@@ -6,16 +6,18 @@ var app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// 环境变量
-var DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "";
+// 环境变量 - 支持GLM(智谱)或DeepSeek
+var API_KEY = process.env.GLM_API_KEY || process.env.DEEPSEEK_API_KEY || "";
+var API_HOST = API_KEY ? (process.env.GLM_API_KEY ? "open.bigmodel.cn" : "api.deepseek.com") : "";
+var API_MODEL = process.env.GLM_API_KEY ? "glm-4-flash" : "deepseek-chat";
 
 // 首页
 app.get("/", function (req, res) {
-  res.json({ status: "ok", service: "speeky-server", time: new Date().toISOString() });
+  res.json({ status: "ok", service: "speeky-server", time: new Date().toISOString(), model: API_MODEL });
 });
 
 /**
- * 获取微信 OpenID（云托管自动注入header）
+ * 获取微信 OpenID
  */
 app.get("/api/wx_openid", function (req, res) {
   if (req.headers["x-wx-source"]) {
@@ -35,56 +37,18 @@ app.post("/api/ai-feedback", function (req, res) {
     return res.json({ code: 1, msg: "text too short" });
   }
 
-  if (!DEEPSEEK_API_KEY) {
+  if (!API_KEY) {
     return res.json({ code: 0, data: fallbackFeedback() });
   }
 
-  var prompt = 'You are an English writing tutor. Analyze this diary entry by a Chinese English learner. ' +
+  var prompt = "You are an English writing tutor. Analyze this diary entry by a Chinese English learner. " +
     'Return JSON only, no markdown fence: ' +
     '{"good": "one thing done well (in Chinese)", "suggest": "one improvement suggestion (in Chinese)", ' +
     '"better": "rewrite one sentence in better English", "score": 85}\n\nDiary: ' + text;
 
-  var postData = JSON.stringify({
-    model: "deepseek-chat",
-    messages: [{ role: "user", content: prompt }],
-    max_tokens: 300,
-    temperature: 0.3
+  callAI(prompt, function (result) {
+    res.json({ code: 0, data: result });
   });
-
-  var options = {
-    hostname: "api.deepseek.com",
-    path: "/v1/chat/completions",
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer " + DEEPSEEK_API_KEY,
-      "Content-Length": Buffer.byteLength(postData)
-    }
-  };
-
-  var request = https.request(options, function (response) {
-    var body = "";
-    response.on("data", function (chunk) { body += chunk; });
-    response.on("end", function () {
-      try {
-        var json = JSON.parse(body);
-        var content = json.choices[0].message.content.trim();
-        var result;
-        try { result = JSON.parse(content); }
-        catch (e) { result = fallbackFeedback(); }
-        res.json({ code: 0, data: result });
-      } catch (e) {
-        res.json({ code: 0, data: fallbackFeedback() });
-      }
-    });
-  });
-
-  request.on("error", function () {
-    res.json({ code: 0, data: fallbackFeedback() });
-  });
-
-  request.write(postData);
-  request.end();
 });
 
 /**
@@ -124,6 +88,58 @@ app.post("/api/speech-eval", function (req, res) {
   });
 });
 
+/**
+ * 通用AI调用 - 支持GLM和DeepSeek
+ */
+function callAI(prompt, callback) {
+  var postData = JSON.stringify({
+    model: API_MODEL,
+    messages: [{ role: "user", content: prompt }],
+    max_tokens: 300,
+    temperature: 0.3
+  });
+
+  var apiPath = "/api/paas/v4/chat/completions";
+  if (API_HOST === "api.deepseek.com") {
+    apiPath = "/v1/chat/completions";
+  }
+
+  var options = {
+    hostname: API_HOST,
+    path: apiPath,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + API_KEY,
+      "Content-Length": Buffer.byteLength(postData)
+    }
+  };
+
+  var request = https.request(options, function (response) {
+    var body = "";
+    response.on("data", function (chunk) { body += chunk; });
+    response.on("end", function () {
+      try {
+        var json = JSON.parse(body);
+        var content = json.choices[0].message.content.trim();
+        var result;
+        try { result = JSON.parse(content); }
+        catch (e) { result = fallbackFeedback(); }
+        callback(result);
+      } catch (e) {
+        callback(fallbackFeedback());
+      }
+    });
+  });
+
+  request.on("error", function () {
+    callback(fallbackFeedback());
+  });
+
+  request.write(postData);
+  request.end();
+}
+
 function fallbackFeedback() {
   return {
     good: "Your sentence structure is clear and easy to understand.",
@@ -135,5 +151,5 @@ function fallbackFeedback() {
 
 var port = process.env.PORT || 80;
 app.listen(port, function () {
-  console.log("speeky-server running on port " + port);
+  console.log("speeky-server running on port " + port + " model:" + API_MODEL);
 });
