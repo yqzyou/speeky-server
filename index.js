@@ -1,7 +1,6 @@
 var path = require("path");
 var express = require("express");
 var https = require("https");
-var http = require("http");
 
 var app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -22,47 +21,42 @@ app.get("/api/wx_openid", function (req, res) {
 /**
  * TTS 文字转语音
  * GET /api/tts?text=Hello+world
- * 返回 mp3 音频流
+ * 使用有道词典API（免费，无需key）
  */
 app.get("/api/tts", function (req, res) {
   var text = req.query.text || "";
   if (!text) return res.status(400).send("missing text");
 
-  // Google Translate TTS（免费，无需key）
-  var url = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q=" + encodeURIComponent(text.slice(0, 200));
+  // 有道发音API - 支持整句
+  var url = "https://dict.youdao.com/dictvoice?audio=" + encodeURIComponent(text.slice(0, 200)) + "&type=2";
 
   https.get(url, function (ttsRes) {
     if (ttsRes.statusCode === 200) {
       res.setHeader("Content-Type", "audio/mpeg");
-      res.setHeader("Content-Length", ttsRes.headers["content-length"] || "0");
+      if (ttsRes.headers["content-length"]) {
+        res.setHeader("Content-Length", ttsRes.headers["content-length"]);
+      }
       ttsRes.pipe(res);
+    } else if (ttsRes.statusCode === 302 || ttsRes.statusCode === 301) {
+      // 跟随重定向
+      var location = ttsRes.headers.location;
+      https.get(location, function (redirRes) {
+        res.setHeader("Content-Type", "audio/mpeg");
+        if (redirRes.headers["content-length"]) {
+          res.setHeader("Content-Length", redirRes.headers["content-length"]);
+        }
+        redirRes.pipe(res);
+      }).on("error", function () {
+        res.status(503).json({ code: 1, msg: "TTS redirect failed" });
+      });
     } else {
-      // Google失败，尝试备选
-      fallbackTTS(text, res);
+      res.status(503).json({ code: 1, msg: "TTS returned " + ttsRes.statusCode });
     }
-  }).on("error", function () {
-    fallbackTTS(text, res);
+  }).on("error", function (e) {
+    res.status(503).json({ code: 1, msg: "TTS error: " + e.message });
   });
 });
 
-function fallbackTTS(text, res) {
-  // 备选：Baidu TTS
-  var url = "https://tts.baidu.com/text2audio?lan=en&ie=UTF-8&spd=4&text=" + encodeURIComponent(text.slice(0, 200));
-  https.get(url, function (ttsRes) {
-    if (ttsRes.statusCode === 200 && (ttsRes.headers["content-type"] || "").indexOf("audio") >= 0) {
-      res.setHeader("Content-Type", "audio/mpeg");
-      ttsRes.pipe(res);
-    } else {
-      res.status(503).json({ code: 1, msg: "TTS unavailable" });
-    }
-  }).on("error", function () {
-    res.status(503).json({ code: 1, msg: "TTS unavailable" });
-  });
-}
-
-/**
- * AI日记反馈
- */
 app.post("/api/ai-feedback", function (req, res) {
   var text = req.body.text || "";
   if (text.length < 5) return res.json({ code: 1, msg: "text too short" });
@@ -76,9 +70,6 @@ app.post("/api/ai-feedback", function (req, res) {
   });
 });
 
-/**
- * 语音评测
- */
 app.post("/api/speech-eval", function (req, res) {
   var text = req.body.text || "";
   var audioDuration = req.body.audioDuration || 0;
