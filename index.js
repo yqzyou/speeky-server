@@ -46,12 +46,12 @@ app.post("/api/ai-feedback", function (req, res) {
     '{"good": "one thing done well (in Chinese)", "suggest": "one improvement suggestion (in Chinese)", ' +
     '"better": "rewrite one sentence in better English", "score": 85}\n\nDiary: ' + text;
 
-  callAI(prompt, function (result, error) {
+  callAI(prompt, function (result, error, rawContent) {
     if (error) {
       console.error("AI API error:", error);
       res.json({ code: 0, data: fallbackFeedback(), source: "error", error: error });
     } else {
-      res.json({ code: 0, data: result, source: "ai" });
+      res.json({ code: 0, data: result, source: "ai", raw: rawContent ? rawContent.slice(0, 500) : null });
     }
   });
 });
@@ -120,29 +120,38 @@ function callAI(prompt, callback) {
     }
   };
 
+  console.log("Calling AI API:", API_HOST, apiPath, "model:", API_MODEL);
+
   var request = https.request(options, function (response) {
     var body = "";
     response.on("data", function (chunk) { body += chunk; });
     response.on("end", function () {
+      console.log("AI API response status:", response.statusCode);
+      console.log("AI API response body:", body.slice(0, 500));
       try {
         var json = JSON.parse(body);
         if (json.error) {
-          callback(fallbackFeedback(), "API: " + JSON.stringify(json.error));
+          callback(fallbackFeedback(), "API: " + JSON.stringify(json.error), null);
           return;
         }
         var content = json.choices[0].message.content.trim();
         var result;
         try { result = JSON.parse(content); }
-        catch (e) { result = fallbackFeedback(); }
-        callback(result, null);
+        catch (e) {
+          // 尝试去掉markdown代码块
+          var cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+          try { result = JSON.parse(cleaned); }
+          catch (e2) { result = fallbackFeedback(); }
+        }
+        callback(result, null, content);
       } catch (e) {
-        callback(fallbackFeedback(), "parse error: " + e.message + " body: " + body.slice(0, 200));
+        callback(fallbackFeedback(), "parse error: " + e.message + " body: " + body.slice(0, 200), null);
       }
     });
   });
 
   request.on("error", function (e) {
-    callback(fallbackFeedback(), "request error: " + e.message);
+    callback(fallbackFeedback(), "request error: " + e.message, null);
   });
 
   request.write(postData);
