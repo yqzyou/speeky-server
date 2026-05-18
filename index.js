@@ -13,7 +13,7 @@ var API_MODEL = process.env.GLM_API_KEY ? "glm-4-flash" : "deepseek-chat";
 
 // 首页
 app.get("/", function (req, res) {
-  res.json({ status: "ok", service: "speeky-server", time: new Date().toISOString(), model: API_MODEL });
+  res.json({ status: "ok", service: "speeky-server", time: new Date().toISOString(), model: API_MODEL, hasKey: !!API_KEY, keyPrefix: API_KEY ? API_KEY.slice(0, 8) + "..." : "none" });
 });
 
 /**
@@ -38,7 +38,7 @@ app.post("/api/ai-feedback", function (req, res) {
   }
 
   if (!API_KEY) {
-    return res.json({ code: 0, data: fallbackFeedback() });
+    return res.json({ code: 0, data: fallbackFeedback(), source: "no-key" });
   }
 
   var prompt = "You are an English writing tutor. Analyze this diary entry by a Chinese English learner. " +
@@ -46,8 +46,13 @@ app.post("/api/ai-feedback", function (req, res) {
     '{"good": "one thing done well (in Chinese)", "suggest": "one improvement suggestion (in Chinese)", ' +
     '"better": "rewrite one sentence in better English", "score": 85}\n\nDiary: ' + text;
 
-  callAI(prompt, function (result) {
-    res.json({ code: 0, data: result });
+  callAI(prompt, function (result, error) {
+    if (error) {
+      console.error("AI API error:", error);
+      res.json({ code: 0, data: fallbackFeedback(), source: "error", error: error });
+    } else {
+      res.json({ code: 0, data: result, source: "ai" });
+    }
   });
 });
 
@@ -121,19 +126,23 @@ function callAI(prompt, callback) {
     response.on("end", function () {
       try {
         var json = JSON.parse(body);
+        if (json.error) {
+          callback(fallbackFeedback(), "API: " + JSON.stringify(json.error));
+          return;
+        }
         var content = json.choices[0].message.content.trim();
         var result;
         try { result = JSON.parse(content); }
         catch (e) { result = fallbackFeedback(); }
-        callback(result);
+        callback(result, null);
       } catch (e) {
-        callback(fallbackFeedback());
+        callback(fallbackFeedback(), "parse error: " + e.message + " body: " + body.slice(0, 200));
       }
     });
   });
 
-  request.on("error", function () {
-    callback(fallbackFeedback());
+  request.on("error", function (e) {
+    callback(fallbackFeedback(), "request error: " + e.message);
   });
 
   request.write(postData);
