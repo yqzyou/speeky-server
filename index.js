@@ -6,79 +6,43 @@ var app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// 环境变量 - 支持GLM(智谱)或DeepSeek
 var API_KEY = process.env.GLM_API_KEY || process.env.DEEPSEEK_API_KEY || "";
 var API_HOST = API_KEY ? (process.env.GLM_API_KEY ? "open.bigmodel.cn" : "api.deepseek.com") : "";
 var API_MODEL = process.env.GLM_API_KEY ? "glm-4-flash" : "deepseek-chat";
 
-// 首页
 app.get("/", function (req, res) {
-  res.json({ status: "ok", service: "speeky-server", time: new Date().toISOString(), model: API_MODEL, hasKey: !!API_KEY, keyPrefix: API_KEY ? API_KEY.slice(0, 8) + "..." : "none" });
+  res.json({ status: "ok", service: "speeky-server", time: new Date().toISOString() });
 });
 
-/**
- * 获取微信 OpenID
- */
 app.get("/api/wx_openid", function (req, res) {
-  if (req.headers["x-wx-source"]) {
-    res.send(req.headers["x-wx-openid"]);
-  } else {
-    res.send("");
-  }
+  res.send(req.headers["x-wx-source"] ? (req.headers["x-wx-openid"] || "") : "");
 });
 
-/**
- * AI日记反馈
- * POST /api/ai-feedback
- */
 app.post("/api/ai-feedback", function (req, res) {
   var text = req.body.text || "";
-  if (text.length < 5) {
-    return res.json({ code: 1, msg: "text too short" });
-  }
-
-  if (!API_KEY) {
-    return res.json({ code: 0, data: fallbackFeedback(), source: "no-key" });
-  }
+  if (text.length < 5) return res.json({ code: 1, msg: "text too short" });
+  if (!API_KEY) return res.json({ code: 0, data: fallbackFeedback() });
 
   var prompt = "You are an English writing tutor. Analyze this diary entry by a Chinese English learner. " +
-    'Return JSON only, no markdown fence: ' +
-    '{"good": "one thing done well (in Chinese)", "suggest": "one improvement suggestion (in Chinese)", ' +
-    '"better": "rewrite one sentence in better English", "score": 85}\n\nDiary: ' + text;
+    'Return JSON only: {"good": "亮点(中文)", "suggest": "建议(中文)", "better": "改写一句", "score": 85}\n\nDiary: ' + text;
 
-  callAI(prompt, function (result, error, rawContent) {
-    if (error) {
-      console.error("AI API error:", error);
-      res.json({ code: 0, data: fallbackFeedback(), source: "error", error: error });
-    } else {
-      res.json({ code: 0, data: result, source: "ai", raw: rawContent ? rawContent.slice(0, 500) : null });
-    }
+  callAI(prompt, function (result) {
+    res.json({ code: 0, data: result });
   });
 });
 
-/**
- * 语音评测
- * POST /api/speech-eval
- */
 app.post("/api/speech-eval", function (req, res) {
   var text = req.body.text || "";
   var audioDuration = req.body.audioDuration || 0;
-
-  if (!text) {
-    return res.json({ code: 1, msg: "missing text" });
-  }
+  if (!text) return res.json({ code: 1, msg: "missing text" });
 
   var base = 65 + Math.floor(Math.random() * 15);
   if (audioDuration > 0) {
-    var wordCount = text.split(" ").length;
-    var expectedDuration = wordCount * 0.4;
-    var ratio = audioDuration / expectedDuration;
+    var ratio = audioDuration / (text.split(" ").length * 0.4);
     if (ratio > 0.6 && ratio < 1.5) base = Math.min(100, base + 10);
     else if (ratio >= 1.5 && ratio < 2.5) base = Math.min(100, base + 3);
   }
-
-  var hasComplex = text.split(" ").filter(function (w) { return w.length > 7; }).length;
-  if (hasComplex > 0) base = Math.min(100, base + 3);
+  if (text.split(" ").filter(function (w) { return w.length > 7; }).length > 0) base = Math.min(100, base + 3);
 
   res.json({
     code: 0,
@@ -93,9 +57,6 @@ app.post("/api/speech-eval", function (req, res) {
   });
 });
 
-/**
- * 通用AI调用 - 支持GLM和DeepSeek
- */
 function callAI(prompt, callback) {
   var postData = JSON.stringify({
     model: API_MODEL,
@@ -104,12 +65,9 @@ function callAI(prompt, callback) {
     temperature: 0.3
   });
 
-  var apiPath = "/api/paas/v4/chat/completions";
-  if (API_HOST === "api.deepseek.com") {
-    apiPath = "/v1/chat/completions";
-  }
+  var apiPath = API_HOST === "api.deepseek.com" ? "/v1/chat/completions" : "/api/paas/v4/chat/completions";
 
-  var options = {
+  var request = https.request({
     hostname: API_HOST,
     path: apiPath,
     method: "POST",
@@ -118,42 +76,21 @@ function callAI(prompt, callback) {
       "Authorization": "Bearer " + API_KEY,
       "Content-Length": Buffer.byteLength(postData)
     }
-  };
-
-  console.log("Calling AI API:", API_HOST, apiPath, "model:", API_MODEL);
-
-  var request = https.request(options, function (response) {
+  }, function (response) {
     var body = "";
     response.on("data", function (chunk) { body += chunk; });
     response.on("end", function () {
-      console.log("AI API response status:", response.statusCode);
-      console.log("AI API response body:", body.slice(0, 500));
       try {
         var json = JSON.parse(body);
-        if (json.error) {
-          callback(fallbackFeedback(), "API: " + JSON.stringify(json.error), null);
-          return;
-        }
+        if (json.error) return callback(fallbackFeedback());
         var content = json.choices[0].message.content.trim();
-        var result;
-        try { result = JSON.parse(content); }
-        catch (e) {
-          // 尝试去掉markdown代码块
-          var cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-          try { result = JSON.parse(cleaned); }
-          catch (e2) { result = fallbackFeedback(); }
-        }
-        callback(result, null, content);
-      } catch (e) {
-        callback(fallbackFeedback(), "parse error: " + e.message + " body: " + body.slice(0, 200), null);
-      }
+        content = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+        try { callback(JSON.parse(content)); }
+        catch (e) { callback(fallbackFeedback()); }
+      } catch (e) { callback(fallbackFeedback()); }
     });
   });
-
-  request.on("error", function (e) {
-    callback(fallbackFeedback(), "request error: " + e.message, null);
-  });
-
+  request.on("error", function () { callback(fallbackFeedback()); });
   request.write(postData);
   request.end();
 }
