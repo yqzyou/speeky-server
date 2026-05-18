@@ -1,6 +1,7 @@
 var path = require("path");
 var express = require("express");
 var https = require("https");
+var http = require("http");
 
 var app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -18,6 +19,50 @@ app.get("/api/wx_openid", function (req, res) {
   res.send(req.headers["x-wx-source"] ? (req.headers["x-wx-openid"] || "") : "");
 });
 
+/**
+ * TTS 文字转语音
+ * GET /api/tts?text=Hello+world
+ * 返回 mp3 音频流
+ */
+app.get("/api/tts", function (req, res) {
+  var text = req.query.text || "";
+  if (!text) return res.status(400).send("missing text");
+
+  // Google Translate TTS（免费，无需key）
+  var url = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q=" + encodeURIComponent(text.slice(0, 200));
+
+  https.get(url, function (ttsRes) {
+    if (ttsRes.statusCode === 200) {
+      res.setHeader("Content-Type", "audio/mpeg");
+      res.setHeader("Content-Length", ttsRes.headers["content-length"] || "0");
+      ttsRes.pipe(res);
+    } else {
+      // Google失败，尝试备选
+      fallbackTTS(text, res);
+    }
+  }).on("error", function () {
+    fallbackTTS(text, res);
+  });
+});
+
+function fallbackTTS(text, res) {
+  // 备选：Baidu TTS
+  var url = "https://tts.baidu.com/text2audio?lan=en&ie=UTF-8&spd=4&text=" + encodeURIComponent(text.slice(0, 200));
+  https.get(url, function (ttsRes) {
+    if (ttsRes.statusCode === 200 && (ttsRes.headers["content-type"] || "").indexOf("audio") >= 0) {
+      res.setHeader("Content-Type", "audio/mpeg");
+      ttsRes.pipe(res);
+    } else {
+      res.status(503).json({ code: 1, msg: "TTS unavailable" });
+    }
+  }).on("error", function () {
+    res.status(503).json({ code: 1, msg: "TTS unavailable" });
+  });
+}
+
+/**
+ * AI日记反馈
+ */
 app.post("/api/ai-feedback", function (req, res) {
   var text = req.body.text || "";
   if (text.length < 5) return res.json({ code: 1, msg: "text too short" });
@@ -31,6 +76,9 @@ app.post("/api/ai-feedback", function (req, res) {
   });
 });
 
+/**
+ * 语音评测
+ */
 app.post("/api/speech-eval", function (req, res) {
   var text = req.body.text || "";
   var audioDuration = req.body.audioDuration || 0;
@@ -64,18 +112,10 @@ function callAI(prompt, callback) {
     max_tokens: 300,
     temperature: 0.3
   });
-
   var apiPath = API_HOST === "api.deepseek.com" ? "/v1/chat/completions" : "/api/paas/v4/chat/completions";
-
   var request = https.request({
-    hostname: API_HOST,
-    path: apiPath,
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer " + API_KEY,
-      "Content-Length": Buffer.byteLength(postData)
-    }
+    hostname: API_HOST, path: apiPath, method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + API_KEY, "Content-Length": Buffer.byteLength(postData) }
   }, function (response) {
     var body = "";
     response.on("data", function (chunk) { body += chunk; });
